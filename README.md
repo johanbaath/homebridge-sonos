@@ -37,7 +37,8 @@ combination and given a name formed by the zone followed by the "name"
 specified. In the example above there will be a switch called "Lounge Party
 Music". This switch will drop that zone from any group, replace the queue with
 the given playlist, set the volume (in percentage - optional), a sleep timer
-(in format `H:MM:SS`, also optional) and then start it playing.
+(in format `H:MM:SS`, also optional), set it to shuffle and then start it
+playing.
 
 *NOTE*: The `playlist` functionality only works for Spotify at this time. It is
 also likely to only work within the UK or the European Union as the code is
