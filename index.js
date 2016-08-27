@@ -403,6 +403,9 @@ SonosPlatform.prototype.updateTopology = function (device, callback) {
           this._log(deviceData, 'Device in zone %s is no longer a member of group %s', deviceData.name, deviceData.group);
           if (groupList) {
             groupList.delete(deviceData.host);
+            if (groupList.size === 0) {
+              this.groupMembers.delete(deviceData.group);
+            }
           }
 
           var previousGroupCoordinator = this.groups.get(deviceData.group);
