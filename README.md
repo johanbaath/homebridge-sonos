@@ -12,16 +12,17 @@ Example config.json:
   "platform": "Sonos",
   "suffix": " Speakers",
   "port": 50200,
-  "playlists": {
-      "Lounge": {
-          "spotify:user:12345678:playlist:XXXXXXXXXXXXXXXXXXXXXX": {
-              "name": "Party Music",
-              "volume": 10,
-              "sleepTimer": "2:00:00"
-          },
-          "spotify:user:username:playlist:XXXXXXXXXXXXXXXXXXXXXX": {
-              "name": "Piano Collection"
-          }
+  "spotify_rincon_id": "2311",
+  "scenes": {
+      "Piano Collection": {
+          "playlist": "spotify:user:12345678:playlist:XXXXXXXXXXXXXXXXXXXXXX",
+          "zones": ["Lounge"],
+          "volume": 10,
+          "sleepTimer": "2:00:00"
+      },
+      "Party Music": {
+          "playlist": "spotify:user:username:playlist:XXXXXXXXXXXXXXXXXXXXXX",
+          "zones": ["Lounge", "Kitchen", "Hallway"]
       }
   }
 }
@@ -35,17 +36,14 @@ The `port` parameter is also optional. It specifies the port to listen on for
 device discovery and communication. It uses both UDP and TCP so open this port
 on your firewall for both.
 
-Adding `playlists` is also optional. Each entry inside it is the name of a
-"zone" and within that a list of spotify playlists. A switch is created for each
-combination and given a name formed by the zone followed by the "name"
-specified. In the example above there will be a switch called "Lounge Party
-Music". This switch will drop that zone from any group, replace the queue with
-the given playlist, set the volume (in percentage - optional), a sleep timer
-(in format `H:MM:SS`, also optional), set it to shuffle and then start it
-playing.
+The `spotify_rincon_id` is optional and defaults to "2311". It is not clear what
+this value means but it is related to Spotify regions. In the UK (and possibly
+the EU) the default of "2311" is fine. US citizens will need to set this to
+"3079" for the playlists to work.
 
-*NOTE*: The `playlist` functionality only works for Spotify at this time. It is
-also likely to only work within the UK or the European Union as the code is
-hardcoded with an identifier that appears to be required to make it work there.
-`node-sonos` on GitHub uses the US identifier so if anyone works out how to make
-it autodetect - head over there and let's implement it!
+Adding `scenes` is also optional. Each entry inside it is the name of a switch
+to create that will set a Sonos "scene". This includes forming a group, setting
+a Spotify playlist, enabling shuffle, and optionally setting the volume and a
+sleep timer. The sleep timer configuration must be in the format `H:MM:SS`,
+
+*NOTE*: The `scenes` functionality only works for Spotify at this time.

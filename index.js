@@ -8,13 +8,6 @@ var url = require('url');
 
 var PlatformAccessory, Service, Characteristic, UUIDGen, VolumeCharacteristic;
 
-var sonosPlatform;
-var sonosAccessories = new Map();
-var sonosDevices = new Map();
-var sonosGroups = new Map();
-var sonosGroupMembers = new Map();
-var sonosPlaylistAccessories = new Map();
-
 module.exports = function (homebridge) {
   PlatformAccessory = homebridge.platformAccessory;
   Service = homebridge.hap.Service;
@@ -30,15 +23,29 @@ module.exports = function (homebridge) {
 
 // SonosPlatform handles device discovery and various events
 function SonosPlatform(log, config, api) {
-  this.log = this._createLogger(log, 'Sonos');
+  this.log = log;
   this.config = _.extend({
-    port:   50200,
+    port: 50200,
     suffix: ' Speaker',
-    playlists: {}
+    spotify_rincon_id: '2311',
+    scenes: {}
   }, config);
   this.api = api;
 
   this.unregisterCachedAccessories = [];
+
+  // {zone: accessory}
+  this.accessories = new Map();
+  // {host: device}
+  this.devices = new Map();
+  // {group: coordinatorDevice}
+  this.groups = new Map();
+  // {group: {host: device}}
+  this.groupMembers = new Map();
+  // {name: accessory}
+  this.sceneAccessories = new Map();
+  // {zone: {name: accessory}}
+  this.zoneSceneAccessories = new Map();
 
   this.api.on('didFinishLaunching', this._didFinishLaunching.bind(this));
 }
@@ -66,10 +73,19 @@ SonosPlatform.prototype._didFinishLaunching = function() {
     this.unregisterCachedAccessories = [];
   }
 
-  // Do we have any missing playlist accessories?
-  // Do we need playlist accessories?
-  for (var zone in this.config.playlists) {
-    this._createPlaylistAccessories(zone);
+  // Do we have any missing scene accessories?
+  for (var name in this.config.scenes) {
+    var sceneAccessory = this.sceneAccessories.get(name);
+    if (sceneAccessory) {
+      continue;
+    }
+
+    new SonosSceneAccessory(
+      this,
+      this._createLogger('Scene:' + name),
+      name,
+      this.config.scenes[name]
+    );
   }
 
   // TODO: Handle devices that are REMOVED from the network and cleanup structures
@@ -77,91 +93,107 @@ SonosPlatform.prototype._didFinishLaunching = function() {
 
 // Configure a cached accessory
 SonosPlatform.prototype.configureAccessory = function (platformAccessory) {
-  if (platformAccessory.context.type == 'SonosPlaylistAccessory') {
-    if (!this.config.playlists[platformAccessory.context.zone] ||
-        !this.config.playlists[platformAccessory.context.zone][platformAccessory.context.uri]) {
+  if (platformAccessory.context.type == 'SonosSceneAccessory') {
+    var sceneConfig = this.config.scenes[platformAccessory.context.name];
+    if (!sceneConfig) {
       this.unregisterCachedAccessories.push(platformAccessory);
       return;
     }
 
-    // Pull name out of configuration not cache in case it was changed
-    var configName = platformAccessory.context.zone + ' ' + this.config.playlists[platformAccessory.context.zone][platformAccessory.context.uri].name;
-    new SonosPlaylistAccessory(
-      this.api,
-      this._createLogger(this.log, configName),
-      configName,
-      platformAccessory.context.uri,
-      this.config.playlists[platformAccessory.context.zone][platformAccessory.context.uri],
+    new SonosSceneAccessory(
+      this,
+      this._createLogger('Scene:' + platformAccessory.context.name),
+      platformAccessory.context.name,
+      sceneConfig,
+      platformAccessory
+    );
+    return;
+  }
+
+  if (platformAccessory.context.type == 'SonosAccessory') {
+    new SonosAccessory(
+      this,
+      this._createLogger(platformAccessory.context.name),
+      platformAccessory.context.name,
       platformAccessory.context.zone,
       platformAccessory
     );
     return;
   }
 
-  platformAccessory.context.type = 'SonosAccessory';
-  new SonosAccessory(
-    this.api,
-    this._createLogger(this.log, platformAccessory.context.name),
-    platformAccessory.context.name,
-    platformAccessory.context.zone,
-    platformAccessory
-  );
+  // Unknown accessory type
+  this.unregisterCachedAccessories.push(platformAccessory);
 };
 
-// Create a new sonos accessory and associated playlist accessories
-SonosPlatform.prototype._createAccessory = function (zone) {
-  var accessory = new SonosAccessory(
-    this.api,
-    this._createLogger(this.log, zone),
-    zone + this.config.suffix,
-    zone
-  );
-
-  // Do we need playlist accessories?
-  if (this.config.playlists[zone]) {
-    this._createPlaylistAccessories(zone);
+// Update reachability of an accessory that we found and any associated scene
+// accessories
+SonosPlatform.prototype._updateReachability = function (accessory, value) {
+  if (value === accessory.platformAccessory.reachable) {
+    return;
   }
 
-  return accessory;
-};
+  if (value) {
+    accessory.log('Accessory is now reachable');
+  } else {
+    accessory.log('Accessory is no longer reachable');
+  }
 
-// Create playlist accessories for a zone if they don't exist
-SonosPlatform.prototype._createPlaylistAccessories = function (zone) {
-  for (var uri in this.config.playlists[zone]) {
-    var playlistList = sonosPlaylistAccessories.get(zone);
-    if (playlistList !== undefined && playlistList.get(uri)) {
+  accessory.platformAccessory.updateReachability(value);
+
+  // Process scene accessories
+  var sceneList = this.zoneSceneAccessories.get(accessory.zone);
+  if (!sceneList) {
+    return;
+  }
+
+  sceneList.forEach(function (sceneAccessory) {
+    if (value === sceneAccessory.platformAccessory.reachable) {
       return;
     }
 
-    new SonosPlaylistAccessory(
-      this.api,
-      this._createLogger(this.log, zone),
-      zone + ' ' + this.config.playlists[zone][uri].name,
-      uri,
-      this.config.playlists[zone][uri],
-      zone
-    );
-  }
+    if (value) {
+      sceneAccessory.log('Accessory is now reachable');
+      sceneAccessory.platformAccessory.updateReachability(true);
+      return;
+    }
+
+    // Before removing reachability - check if any other zones are available
+    this._updateSceneUnreachability(sceneAccessory, accessory.zone);
+  }.bind(this));
 };
 
-// Update reachability of an accessory that we found and any associated playlist
-// accessories
-SonosPlatform.prototype._updateReachability = function (accessory, value) {
-  accessory.log('Accessory is now reachable');
-  accessory.platformAccessory.updateReachability(true);
+// Check that there is still a reachable zone in the scene, removing reachability
+// if there is not
+SonosPlatform.prototype._updateSceneUnreachability = function (sceneAccessory, unreachableZone) {
+  var isReachable = false;
 
-  // Process playlist accessories
-  var playlistList = sonosPlaylistAccessories.get(accessory.zone);
-  if (playlistList !== undefined) {
-    playlistList.forEach(function (playlistAccessory, uri) {
-      playlistAccessory.log('Accessory is now reachable');
-      playlistAccessory.platformAccessory.updateReachability(true);
-    }.bind(this));
+  for (var i in sceneAccessory.sceneConfig.zones) {
+    var zone = sceneAccessory.sceneConfig.zones[i];
+
+    if (zone == unreachableZone) {
+      continue;
+    }
+
+    var zoneAccessory = this.accessories.get(zone);
+    if (!zoneAccessory || !zoneAccessory.device) {
+      continue;
+    }
+
+    isReachable = true;
+    break;
   }
+
+  if (isReachable) {
+    return;
+  }
+
+  sceneAccessory.log('Accessory is no longer reachable');
+  sceneAccessory.platformAccessory.updateReachability(false);
 };
 
 // Create a logger for an accessory
-SonosPlatform.prototype._createLogger = function (log, prefix) {
+SonosPlatform.prototype._createLogger = function (prefix) {
+  var log = this.log;
   return function () {
     var args = Array.from(arguments);
     args[0] = '[' + prefix + '] ' + args[0];
@@ -170,10 +202,10 @@ SonosPlatform.prototype._createLogger = function (log, prefix) {
 };
 
 // Logging helper - will log device messages under its accessory if it has one
-SonosPlatform.prototype._log = function (data) {
+SonosPlatform.prototype._log = function (deviceData) {
   var args = Array.from(arguments).slice(1);
-  if (data.accessory) {
-    data.accessory.log.apply(data.accessory.log, args);
+  if (deviceData.accessory) {
+    deviceData.accessory.log.apply(deviceData.accessory.log, args);
     return;
   }
   this.log.apply(null, args);
@@ -183,14 +215,14 @@ SonosPlatform.prototype._log = function (data) {
 SonosPlatform.prototype._processDiscovery = function (device, model) {
   this.log('Found device at %s', device.host);
 
-  if (sonosDevices.get(device.host) !== undefined) {
+  if (this.devices.get(device.host)) {
     // We know this device already
     return;
   }
 
   // Process this new device's topology, adding all other devices from it and
   // registering event handlers
-  this._processTopology(device);
+  this.updateTopology(device);
 };
 
 // Process group management events that occur when group changes happen
@@ -201,22 +233,22 @@ SonosPlatform.prototype._processEvent = function (endpoint, sid, eventData, devi
     //       an optimisation would be to track which devices know each other
     //       (would that be ALL on the network?) and only register for
     //       group events one time
-    this._processTopology(device);
+    this.updateTopology(device);
     return;
   }
 
-  var data = sonosDevices.get(device.host);
-  if (data === undefined) {
+  var deviceData = this.devices.get(device.host);
+  if (!deviceData) {
     this.log('Event received from undiscovered device at %s', device.host);
     return;
-  } else if (!data.accessory) {
+  } else if (!deviceData.accessory) {
     this.log('Event received from device without accessory at %s', device.host);
     return;
   }
 
   this._parseEvent(eventData, function (err, eventStruct) {
     if (err) {
-      this._log(data, 'Invalid event received: %s', err);
+      this._log(deviceData, 'Invalid event received: %s', err);
       return;
     }
 
@@ -224,19 +256,19 @@ SonosPlatform.prototype._processEvent = function (endpoint, sid, eventData, devi
       // Ignore if not coordinator - probably means this device just left the
       // group and is now coordinating another group. So let's let the topology
       // update happen which will request another event by re-registering
-      if (data.coordinator !== 'true') {
-        this._log(data, 'Ignoring AV event from non-coordinator device');
+      if (deviceData.coordinator !== 'true') {
+        this._log(deviceData, 'Ignoring AV event from non-coordinator device');
         return;
       }
 
       // Play state change event occurred
-      this._processAVEvent(data, eventStruct);
+      this._processAVEvent(deviceData, eventStruct);
       return;
     }
 
     if (endpoint == '/MediaRenderer/RenderingControl/Event') {
       // Volume change event occurred
-      this._processRenderingEvent(data, eventStruct);
+      this._processRenderingEvent(deviceData, eventStruct);
       return;
     }
   }.bind(this));
@@ -245,7 +277,7 @@ SonosPlatform.prototype._processEvent = function (endpoint, sid, eventData, devi
 // Process an event structure and parse the XML
 SonosPlatform.prototype._parseEvent = function (eventData, callback) {
   // Validate the event structure
-  if (eventData.LastChange === undefined) {
+  if (!eventData.LastChange) {
     callback(new Error('Invalid event structure received'));
     return;
   }
@@ -262,59 +294,72 @@ SonosPlatform.prototype._parseEvent = function (eventData, callback) {
 };
 
 // Process topology data for a device
-SonosPlatform.prototype._processTopology = function (device) {
+SonosPlatform.prototype.updateTopology = function (device, callback) {
   this.log('Starting topology update from device at %s', device.host);
 
   device.getTopology(function (err, topology) {
     if (err || !topology) {
       this.log('Topology update from device at %s failed: %s', device.host, err);
+      callback(err ? err : new Error('Invalid topology data'));
       return;
     }
 
     // For each zone, register the device orupdate the name, group and coordinator
     // and for new devices setup event handlers
-    topology.zones.forEach(function (group) {
-      var urlObj = url.parse(group.location),
+    topology.zones.forEach(function (topologyZone) {
+      var urlObj = url.parse(topologyZone.location),
           host = urlObj.hostname,
           port = urlObj.port,
-          data = sonosDevices.get(host);
+          deviceData = this.devices.get(host);
 
-      if (data === undefined) {
+      if (!deviceData) {
         // New device, setup initial data, the rest will be updated below
-        data = {
+        deviceData = {
           host: host,
           port: port,
-          sonos: new Sonos(host, port)
+          sonos: new Sonos(host, port),
+          // The following are stubs that document the available data
+          name: undefined,
+          coordinator: undefined,
+          queueUri: '',
+          group: undefined,
+          uuid: undefined
         };
 
         // Register for events and store the new device
-        this.listener.addService('/GroupManagement/Event', function () {}, data.sonos);
-        this.listener.addService('/MediaRenderer/AVTransport/Event', function () {}, data.sonos);
-        this.listener.addService('/MediaRenderer/RenderingControl/Event', function () {}, data.sonos);
-        sonosDevices.set(host, data);
+        this.listener.addService('/GroupManagement/Event', function () {}, deviceData.sonos);
+        this.listener.addService('/MediaRenderer/AVTransport/Event', function () {}, deviceData.sonos);
+        this.listener.addService('/MediaRenderer/RenderingControl/Event', function () {}, deviceData.sonos);
+        this.devices.set(host, deviceData);
 
         this.log('Registered new device at %s:%s', host, port);
       }
 
-      this._log(data, 'Processing topology for device at %s', host);
+      this._log(deviceData, 'Processing topology for device at %s', host);
 
       // Set/update zone name for this device and associated accessory
-      if (group.name !== data.name) {
-        var accessory = sonosAccessories.get(group.name);
+      if (topologyZone.name !== deviceData.name) {
+        var accessory = this.accessories.get(topologyZone.name);
 
-        if (data.accessory) {
-          data.accessory.log('Associated device has been renamed to zone %s - accessory is now unavailable', group.name);
-          data.accessory.device = undefined;
+        if (deviceData.accessory) {
+          deviceData.accessory.log('Associated device has been renamed to zone %s - accessory is now unavailable', topologyZone.name);
+          deviceData.accessory.device = undefined;
+          this._updateReachability(deviceData.accessory, false);
         }
 
         if (accessory) {
           this._updateReachability(accessory, true);
         } else {
-          accessory = this._createAccessory(group.name);
+          accessory = new SonosAccessory(
+            this,
+            this._createLogger(topologyZone.name),
+            topologyZone.name + this.config.suffix,
+            topologyZone.name
+          );
         }
 
-        data.name = group.name;
-        data.accessory = accessory;
+        deviceData.name = topologyZone.name;
+        deviceData.accessory = accessory;
 
         if (accessory.device) {
           accessory.log('Associated device has changed from %s to %s', accessory.device.host, host);
@@ -322,65 +367,71 @@ SonosPlatform.prototype._processTopology = function (device) {
         } else {
           accessory.log('Associated device discovered at %s', host);
         }
-        accessory.device = data;
+        accessory.device = deviceData;
       }
 
       // Set/update the group information - and the group map that locates coordinators
-      if (group.coordinator !== data.coordinator) {
-        if (data.coordinator === 'true') {
-          this._log(data, 'Device in zone %s is no longer the coordinator of group %s', data.name, data.group);
-          sonosGroups.delete(data.group);
+      if (topologyZone.coordinator !== deviceData.coordinator) {
+        if (deviceData.coordinator === 'true') {
+          this._log(deviceData, 'Device in zone %s is no longer the coordinator of group %s', deviceData.name, deviceData.group);
+          this.groups.delete(deviceData.group);
+          deviceData.queueUri = '';
         }
 
-        data.coordinator = group.coordinator;
+        deviceData.coordinator = topologyZone.coordinator;
 
-        if (data.coordinator === 'true') {
-          if (sonosGroups.get(group.group) === undefined) {
-            this._log(data, 'Device in zone %s is now coordinator of group %s', data.name, group.group);
+        if (deviceData.coordinator === 'true') {
+          var previousCoordinator = this.groups.get(topologyZone.group);
+          if (previousCoordinator) {
+            // Ensure we lose the coordinator flag on the previous coordinator as
+            // otherwise if we encounter the flag change after this we'll corrupt indexes
+            this._log(previousCoordinator, 'Device in zone %s is no longer coordinator of group %s', previousCoordinator.name, topologyZone.group);
+            previousCoordinator.coordinator = 'false';
+          } else {
+            this._log(deviceData, 'Device in zone %s is now coordinator of group %s', deviceData.name, topologyZone.group);
           }
-          sonosGroups.set(group.group, data);
+          this.groups.set(topologyZone.group, deviceData);
         }
       }
 
-      if (group.group !== data.group) {
+      if (topologyZone.group !== deviceData.group) {
         var groupList,
-            coordinator = sonosGroups.get(group.group);
+            coordinator = this.groups.get(topologyZone.group);
 
-        if (data.group) {
-          groupList = sonosGroupMembers.get(data.group);
-          this._log(data, 'Device in zone %s is no longer a member of group %s', data.name, data.group);
-          if (groupList !== undefined) {
-            groupList.delete(data.host);
+        if (deviceData.group) {
+          groupList = this.groupMembers.get(deviceData.group);
+          this._log(deviceData, 'Device in zone %s is no longer a member of group %s', deviceData.name, deviceData.group);
+          if (groupList) {
+            groupList.delete(deviceData.host);
           }
 
-          var previousGroupCoordinator = sonosGroups.get(data.group);
+          var previousGroupCoordinator = this.groups.get(deviceData.group);
           if (previousGroupCoordinator) {
             // If the old coordinator is the same as this one - move it
-            if (previousGroupCoordinator.host == data.host) {
-              sonosGroups.delete(data.group);
-              sonosGroups.set(group.group, data);
+            if (previousGroupCoordinator.host == deviceData.host) {
+              this.groups.delete(deviceData.group);
+              this.groups.set(topologyZone.group, deviceData);
               coordinator = previousGroupCoordinator;
             } else {
               // Request a new AV event for the previous group's coordinator as possibly
-              // some of the playlist accessories need turning on if the coordinator is
-              // now standalone
+              // some of the playlist accessories need turning on if the topology now matches
               this.listener.addService('/MediaRenderer/AVTransport/Event', function () {}, previousGroupCoordinator.sonos);
             }
           }
         }
 
-        data.group = group.group;
-        groupList = sonosGroupMembers.get(data.group);
-        if (groupList === undefined) {
+        deviceData.group = topologyZone.group;
+        groupList = this.groupMembers.get(deviceData.group);
+        if (!groupList) {
           groupList = new Map();
-          sonosGroupMembers.set(data.group, groupList);
+          this.groupMembers.set(deviceData.group, groupList);
         }
-        groupList.set(data.host, data);
+        groupList.set(deviceData.host, deviceData);
 
-        if (coordinator === undefined) {
-          this._log(data, 'Device in zone %s is now a member of group %s with no known coordinator', data.name, data.group);
+        if (!coordinator) {
+          this._log(deviceData, 'Device in zone %s is now a member of group %s with no known coordinator', deviceData.name, deviceData.group);
         } else {
-          this._log(data, 'Device in zone %s is now a member of group %s with coordinator in zone %s', data.name, data.group, coordinator.name);
+          this._log(deviceData, 'Device in zone %s is now a member of group %s with coordinator in zone %s', deviceData.name, deviceData.group, coordinator.name);
 
           // Trigger a fresh event from the coordinator so we update power states of this device
           // correctly as it may have sent its AV event before we updated topology, and it would
@@ -388,14 +439,22 @@ SonosPlatform.prototype._processTopology = function (device) {
           this.listener.addService('/MediaRenderer/AVTransport/Event', function () {}, coordinator.sonos);
         }
       }
+
+      if (topologyZone.uuid != deviceData.uuid) {
+        deviceData.uuid = topologyZone.uuid;
+        this._log(deviceData, 'Device in zone %s is now UUID %s', deviceData.name, deviceData.uuid);
+      }
     }.bind(this));
 
     this.log('Topology update from device %s completed', device.host);
+    if (callback) {
+      callback(null);
+    }
   }.bind(this));
 };
 
 // Process a state change event
-SonosPlatform.prototype._processAVEvent = function (data, eventStruct) {
+SonosPlatform.prototype._processAVEvent = function (deviceData, eventStruct) {
   var value, queueUri;
   if (eventStruct.TransportState && eventStruct.TransportState[0].$.val == "PLAYING") {
     value = true;
@@ -409,73 +468,130 @@ SonosPlatform.prototype._processAVEvent = function (data, eventStruct) {
     queueUri = '';
   }
 
-  this._log(data, 'State is now %s and queue URI is now "%s"', value, queueUri);
+  deviceData.queueUri = queueUri;
 
-  var groupList = sonosGroupMembers.get(data.group);
+  this._log(deviceData, 'State is now %s and queue URI is now "%s"', value, queueUri);
+
+  var groupList = this.groupMembers.get(deviceData.group);
   if (!groupList) {
     return;
   }
 
   // Update power state of all group members
-  groupList.forEach(function (memberData) {
-    if (!data.accessory) {
+  groupList.forEach(function (memberDeviceData) {
+    if (!deviceData.accessory) {
       return;
     }
 
-    this._log(memberData, 'Updating power characteristic to %s', value);
-    memberData.accessory.service.getCharacteristic(Characteristic.On).setValue(value, null, '_internal');
-
-    // Process playlist accessories - mark as off if not a standalone group
-    var playlistList = sonosPlaylistAccessories.get(memberData.name);
-    if (playlistList !== undefined) {
-      playlistList.forEach(function (playlistAccessory, uri) {
-        var playlistValue,
-            expectedUri = 'x-rincon-cpcontainer:10062a6c' + uri.replace(/:/g, '%3a');
-        if (queueUri == expectedUri && groupList.size == 1) {
-          playlistValue = true;
-        } else {
-          playlistValue = false;
-        }
-        playlistAccessory.log('Updating power characteristic to %s for playlist uri %s', playlistValue, uri);
-        playlistAccessory.service.getCharacteristic(Characteristic.On).setValue(playlistValue, null, '_internal');
-      }.bind(this));
-    }
+    memberDeviceData.accessory.updateOn(value);
   }.bind(this));
+
+  // Process scene accessories involving this zone
+  var sceneList = this.zoneSceneAccessories.get(deviceData.name);
+  if (sceneList) {
+    sceneList.forEach(function (sceneAccessory, name) {
+      var powerState = value;
+
+      // If turning something on - check if we should turn on the scene switch
+      if (powerState) {
+        powerState = this._calculateScenePowerState(sceneAccessory, deviceData);
+      }
+
+      sceneAccessory.updateOn(powerState);
+    }.bind(this));
+  }
 };
 
-SonosPlatform.prototype._processRenderingEvent = function (data, eventStruct) {
-  var value;
-  eventStruct.Volume.forEach(function (item) {
-    if (item.$.channel == 'Master') {
-      value = item.$.val;
-    }
-  });
+SonosPlatform.prototype._calculateScenePowerState = function (sceneAccessory, deviceData) {
+  // Check playlist matches before allowing it to turn on
+  if (!sceneAccessory.isDevicePlayingSceneUri(deviceData)) {
+    return false;
+  }
 
-  this._log(data, 'Updating volume characteristic to %s for device in zone %s', value, data.name);
-  data.accessory.service.getCharacteristic(VolumeCharacteristic).setValue(value, null, '_internal');
+  // Check the topology is correct
+  if (!sceneAccessory.validateTopology(deviceData)) {
+    return false;
+  }
+
+  return true;
+};
+
+SonosPlatform.prototype._processRenderingEvent = function (deviceData, eventStruct) {
+  var value = 0;
+  if (eventStruct.Volume) {
+    eventStruct.Volume.forEach(function (item) {
+      if (item.$.channel == 'Master') {
+        value = item.$.val;
+      }
+    });
+  }
+
+  this._log(deviceData, 'Updating volume characteristic to %s for device in zone %s', value, deviceData.name);
+  deviceData.accessory.service.getCharacteristic(VolumeCharacteristic).setValue(value, null, '_internal');
 };
 
 //
-// Sonos Playlist Accessory
+// Sonos Accessory Utils
 //
 
-function SonosPlaylistAccessory(api, log, name, uri, config, zone, platformAccessory) {
-  this.api = api;
+// Begin transition flag and register a callback to reset it
+function _utilBeginTransition(what, callback) {
+  this['isTransitioning' + what] = true;
+
+  // If we have a deferred timeout running already, clear it
+  if (this['deferredTimeout' + what] !== undefined) {
+    clearTimeout(this['deferredTimeout' + what]);
+    this['deferredTimeout' + what] = undefined;
+  }
+
+  return function (err) {
+    // Set a timer to update to any deferred value after a small timeout that
+    // will hopefully be long enough for events to converge on the desired state
+    this['deferredTimeout' + what] = setTimeout(function () {
+      this['isTransitioning' + what] = false;
+      if (this['deferred' + what] === undefined) {
+        return;
+      }
+
+      this['update' + what](this['deferred' + what]);
+      this['deferred' + what] = undefined;
+    }.bind(this), 1000);
+
+    callback(err);
+  }.bind(this);
+}
+
+// Handle an internal power state update
+function _utilUpdateOn(on) {
+  // Are we transitioning?
+  if (!this.isTransitioningOn) {
+    this.log('Updating power characteristic to %s', on);
+    this.service.getCharacteristic(Characteristic.On).setValue(on, null, '_internal');
+    return;
+  }
+
+  this.log('Deferring power characteristic update to %s as it is currently transitioning', on);
+  this.deferredOn = on;
+}
+
+//
+// Sonos Scene Accessory
+//
+
+function SonosSceneAccessory(platform, log, name, sceneConfig, platformAccessory) {
+  this.platform = platform;
   this.log = log;
   this.name = name;
-  this.uri = uri;
-  this.config = config;
-  this.zone = zone;
+  this.sceneConfig = sceneConfig;
 
-  if (platformAccessory === undefined) {
-    this.log('Creating new playlist platform accessory with name %s and URI %s', name, uri);
+  if (!platformAccessory) {
+    this.log('Creating new scene platform accessory with name %s', name);
     platformAccessory = new PlatformAccessory(name, UUIDGen.generate(name));
-    platformAccessory.context.type = 'SonosPlaylistAccessory';
-    platformAccessory.context.uri = uri;
-    platformAccessory.context.zone = zone;
+    platformAccessory.context.type = 'SonosSceneAccessory';
+    platformAccessory.context.name = name;
     this.service = platformAccessory.addService(Service.Switch, name);
   } else {
-    this.log('Restoring cached playlist platform accessory with name %s and URI %s', name, uri);
+    this.log('Restoring cached scene platform accessory with name %s', name);
     this.platformAccessory = platformAccessory;
     this.service = platformAccessory.getService(Service.Switch);
   }
@@ -484,54 +600,96 @@ function SonosPlaylistAccessory(api, log, name, uri, config, zone, platformAcces
     .getCharacteristic(Characteristic.On)
     .on('set', this.setOn.bind(this));
 
-  var playlistList = sonosPlaylistAccessories.get(zone);
-  if (playlistList === undefined) {
-    playlistList = new Map();
-    sonosPlaylistAccessories.set(zone, playlistList);
-  }
-  playlistList.set(uri, this);
+  // Index for quick lookup
+  platform.sceneAccessories.set(name, this);
+  sceneConfig.zones.forEach(function (zone) {
+    var sceneList = platform.zoneSceneAccessories.get(zone);
+    if (!sceneList) {
+      sceneList = new Map();
+      platform.zoneSceneAccessories.set(zone, sceneList);
+    }
+    sceneList.set(name, this);
+  }.bind(this));
 
   if (!this.platformAccessory) {
     this.platformAccessory = platformAccessory;
-    this.api.registerPlatformAccessories('homebridge-sonos', 'Sonos', [platformAccessory]);
+    this.platform.api.registerPlatformAccessories('homebridge-sonos', 'Sonos', [platformAccessory]);
   }
 }
 
-SonosPlaylistAccessory.prototype._getDevice = function () {
-  var accessory = sonosAccessories.get(this.zone);
-  if (!accessory) {
-    return false;
+// Common utils
+SonosSceneAccessory.prototype._beginTransition = _utilBeginTransition;
+SonosSceneAccessory.prototype.updateOn = _utilUpdateOn;
+
+// Fetch the coordinator device associated with this scene, or the first one
+// listed
+SonosSceneAccessory.prototype._getCoordinator = function () {
+  var firstAccessoryDevice = false;
+
+  for (var i in this.sceneConfig.zones) {
+    var zone = this.sceneConfig.zones[i];
+        accessory = this.platform.accessories.get(zone);
+
+    if (firstAccessoryDevice === false && accessory) {
+      firstAccessoryDevice = accessory.device;
+    }
+    if (accessory.device && accessory.device.coordinator === 'true') {
+      return accessory.device;
+    }
   }
 
-  return accessory.device;
+  return firstAccessoryDevice;
 };
 
-SonosPlaylistAccessory.prototype.setOn = function(on, callback, context) {
+// Handle power state
+SonosSceneAccessory.prototype.setOn = function (on, callback, context) {
   if (context == '_internal') {
     // An internal status update - don't do anything
     callback(null);
     return;
   }
 
-  var device = this._getDevice();
+  var device = this._getCoordinator();
   if (!device) {
-    this.log('Ignoring request; Sonos device has not yet been discovered.');
+    this.log('Ignoring request; Sonos devices have not yet been discovered.');
     callback(new Error('Sonos has not been discovered yet.'));
     return;
   }
 
-  if (on) {
-    this.log('Starting playlist request for %s', this.uri);
-  } else {
-    this.log('Clearing playlist from %s', this.uri);
-  }
+  // Flag that a transition is happening so we can prevent status updates until
+  // we complete
+  callback = this._beginTransition('On', callback);
 
-  var groupList = sonosGroups.get(device.group);
-  if (groupList === undefined || groupList.size == 1) {
-    this._configurePlaylist(on, device, callback);
+  if (!on) {
+    this.log('Pausing coordinator');
+    device.sonos.pause(function (err) {
+      if (err) {
+        this.log('Pause request failed: %s', err);
+        callback(err);
+        return;
+      }
+
+      this.log('Pause request successful');
+      callback(null);
+    }.bind(this));
     return;
   }
 
+  // Validate the group is correct
+  if (this.validateTopology(device)) {
+    this.log('Starting scene request with existing group coordinator: %s', device.name);
+    if (this.isDevicePlayingSceneUri(device)) {
+      this._configureVolume(device, callback);
+      return;
+    }
+    this._configurePlaylist(device, callback);
+    return;
+  }
+
+  this.log('Starting scene request by forming new group with new coordinator: %s', device.name);
+
+  // Group is wrong - take the current device as the coordinator and configure
+  // the others
   device.sonos.becomeCoordinatorOfStandaloneGroup(function (err) {
     if (err) {
       this.log('Standalone group request failed: %s', err);
@@ -539,12 +697,117 @@ SonosPlaylistAccessory.prototype.setOn = function(on, callback, context) {
       return;
     }
 
-    this._configurePlaylist(on, device, callback);
+    if (this.sceneConfig.zones.length == 1) {
+      this._configurePlaylist(device, callback);
+      return;
+    }
+
+    this.log('New coordinator in %s is now configured', device.name);
+
+    this.platform.updateTopology(device.sonos, function (err) {
+      if (err) {
+        this.log('Topology update failed: %s', err);
+        callback(err);
+        return;
+      }
+
+      this._configureTopology(device, callback);
+    }.bind(this));
   }.bind(this));
 };
 
+// Validate that the topology of the group containing the given device matches
+// what we need for this scene
+SonosSceneAccessory.prototype.validateTopology = function (device) {
+  // Grab the device list for this zone
+  var groupList = this.platform.groupMembers.get(device.group);
+  if (!groupList) {
+    return false;
+  }
+
+  // Compare the list with our zone list, ignoring unavailable zones
+  var missingList = new Map(groupList);
+
+  for (var i in this.sceneConfig.zones) {
+    var zone = this.sceneConfig.zones[i],
+        zoneAccessory = this.platform.accessories.get(zone);
+
+    if (!zoneAccessory || !zoneAccessory.device) {
+      // Unavailable zone, ignore it so we can still use the switch
+      continue;
+    }
+
+    // Is the required zone in the group?
+    if (!missingList.get(zoneAccessory.device.host)) {
+      // We have a missing zone and need to recreate the group
+      return false;
+    }
+
+    missingList.delete(zoneAccessory.device.host);
+  }
+
+  if (missingList.size !== 0) {
+    // Not valid - need to create new group
+    return false;
+  }
+
+  return true;
+};
+
+// Returns true if the given device is currently playing the requested URI
+SonosSceneAccessory.prototype.isDevicePlayingSceneUri = function (device) {
+  var expectedUri = 'x-rincon-cpcontainer:10062a6c' + this.sceneConfig.playlist.replace(/:/g, '%3a');
+  return device.queueUri === expectedUri;
+};
+
+// Configure the other devices in the scene configuration to use our coordinator
+SonosSceneAccessory.prototype._configureTopology = function (device, callback) {
+  var topologyUpdateStack = [],
+      stagedCallback = function (zone, err) {
+        if (err) {
+          this.log('Topology change request for %s failed: %s', zone, err);
+          callback(err);
+          return;
+        }
+
+        this.log('New topology with coordinator %s now includes %s', device.name, zone);
+        var next = topologyUpdateStack.shift();
+        if (next) {
+          next();
+          return;
+        }
+
+        this.log('Topology configuration has completed');
+        this._configurePlaylist(device, callback);
+      };
+
+  this.sceneConfig.zones.forEach(function (zone) {
+    if (zone == device.name) {
+      return;
+    }
+
+    // Skip unavailable zones so we can function partially
+    var zoneAccessory = this.platform.accessories.get(zone);
+    if (!zoneAccessory || !zoneAccessory.device) {
+      this.log('Skipping configuration of zone %s as it is unreachable', zoneAccessory.device.name);
+      return;
+    }
+
+    topologyUpdateStack.push(function () {
+      zoneAccessory.device.sonos.queueNext('x-rincon:' + device.uuid, stagedCallback.bind(this, zone));
+    }.bind(this));
+  }.bind(this));
+
+  // Begin updating the topology one by one
+  // Never do this in parallel as it confuses Sonos if any of the target zones
+  // are grouped as when we remove one zone from a group the other members begin
+  // to re-elect a coordinator for that group and if we try to change their
+  // membership while that happens - they'll pretty much just ignore us
+  topologyUpdateStack.shift()();
+};
+
 // Process the queue URI and play the playlist
-SonosPlaylistAccessory.prototype._configurePlaylist = function (on, device, callback) {
+SonosSceneAccessory.prototype._configurePlaylist = function (device, callback) {
   device.sonos.flush(function (err) {
     if (err) {
       this.log('Queue flush request failed: %s', err);
@@ -552,16 +815,10 @@ SonosPlaylistAccessory.prototype._configurePlaylist = function (on, device, call
       return;
     }
 
-    if (!on) {
-      // If we are switching off we only clear the queue
-      callback(null);
-      return;
-    }
-
     device.sonos.queue({
-      uri: 'x-rincon-cpcontainer:10062a6c' + this.uri.replace(/:/g, '%3a'),
+      uri: 'x-rincon-cpcontainer:10062a6c' + this.sceneConfig.playlist.replace(/:/g, '%3a'),
       metadata: '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">' +
-                '<item id="10062a6c' + this.uri.replace(/:/g, '%3a') + '"  restricted="true"><dc:title>New</dc:title><upnp:class>object.container.playlistContainer</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON2311_X_#Svc2311-0-Token</desc></item></DIDL-Lite>'
+                '<item id="10062a6c' + this.sceneConfig.playlist.replace(/:/g, '%3a') + '"  restricted="true"><dc:title>New</dc:title><upnp:class>object.container.playlistContainer</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON' + this.platform.config.spotify_rincon_id + '_X_#Svc' + this.platform.config.spotify_rincon_id + '-0-Token</desc></item></DIDL-Lite>'
     }, function (err) {
       if (err) {
         this.log('Playlist queue request failed: %s', err);
@@ -569,26 +826,32 @@ SonosPlaylistAccessory.prototype._configurePlaylist = function (on, device, call
         return;
       }
 
-      if (this.config.volume === undefined) {
-        this._play(device, callback);
-        return;
-      }
-
-      // Set the volume before we start playing
-      device.sonos.setVolume(this.config.volume, function (err) {
-        if (err) {
-          this.log('Volume request failed: %s', err);
-          callback(err);
-          return;
-        }
-
-        this._play(device, callback);
-      }.bind(this));
+      this._configureVolume(device, callback);
     }.bind(this));
   }.bind(this));
 };
 
-SonosPlaylistAccessory.prototype._play = function (device, callback) {
+// Configure volume level
+SonosSceneAccessory.prototype._configureVolume = function (device, callback) {
+  if (!this.sceneConfig.volume) {
+    this._play(device, callback);
+    return;
+  }
+
+  // Set the volume before we start playing
+  device.sonos.setVolume(this.sceneConfig.volume, function (err) {
+    if (err) {
+      this.log('Volume request failed: %s', err);
+      callback(err);
+      return;
+    }
+
+    this._play(device, callback);
+  }.bind(this));
+};
+
+// Set play mode and start playing
+SonosSceneAccessory.prototype._play = function (device, callback) {
   device.sonos.setPlayMode('SHUFFLE_NOREPEAT', function (err) {
     if (err) {
       this.log('Play mode request failed: %s', err);
@@ -596,15 +859,21 @@ SonosPlaylistAccessory.prototype._play = function (device, callback) {
       return;
     }
 
-    device.sonos.play(function (err) {
+    if (!device.accessory) {
+      this.log('Sonos device became unreachable during play request');
+      callback(new Error('Sonos device became unreachable'));
+      return;
+    }
+
+    device.accessory.unmuteAndPlay(function (err) {
       if (err) {
-        this.log('Play request failed: %s', err);
+        this.log('Unmute request failed: %s', err);
         callback(err);
         return;
       }
 
-      if (this.config.sleepTimer === undefined) {
-        this.log('Playlist %s successfully played', this.uri);
+      if (!this.sceneConfig.sleepTimer) {
+        this.log('Playlist %s successfully played', this.sceneConfig.playlist);
         callback(null);
         return;
       }
@@ -614,18 +883,18 @@ SonosPlaylistAccessory.prototype._play = function (device, callback) {
   }.bind(this));
 };
 
-SonosPlaylistAccessory.prototype._configureSleepTimer = function (device, callback) {
+SonosSceneAccessory.prototype._configureSleepTimer = function (device, callback) {
   var action = '"urn:schemas-upnp-org:service:AVTransport:1#ConfigureSleepTimer"',
-      body = '<u:ConfigureSleepTimer xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><InstanceID>0</InstanceID><NewSleepTimerDuration>' + this.config.sleepTimer + '</NewSleepTimerDuration></u:ConfigureSleepTimer>',
+      body = '<u:ConfigureSleepTimer xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><InstanceID>0</InstanceID><NewSleepTimerDuration>' + this.sceneConfig.sleepTimer + '</NewSleepTimerDuration></u:ConfigureSleepTimer>',
       responseTag = 'u:ConfigureSleepTimerResponse';
-  device.sonos.request(device.sonos.options.endpoints.transport, action, body, responseTag, function (err, data) {
+  device.sonos.request(device.sonos.options.endpoints.transport, action, body, responseTag, function (err) {
     if (err) {
       this.log('Sleep timer request failed: %s', err);
       callback(err);
       return;
     }
 
-    this.log('Playlist %s successfully played', this.uri);
+    this.log('Playlist %s successfully played', this.sceneConfig.playlist);
     callback(null);
   }.bind(this));
 };
@@ -634,17 +903,17 @@ SonosPlaylistAccessory.prototype._configureSleepTimer = function (device, callba
 // Sonos Accessory
 //
 
-function SonosAccessory(api, log, name, zone, platformAccessory) {
-  this.api = api;
+function SonosAccessory(platform, log, name, zone, platformAccessory) {
+  this.platform = platform;
   this.log = log;
   this.name = name;
   this.zone = zone;
 
-  if (sonosAccessories.get(zone) !== undefined) {
+  if (platform.accessories.get(zone)) {
     throw new Error('Duplicate accessory for zone ' + zone + ' in use.');
   }
 
-  if (platformAccessory === undefined) {
+  if (!platformAccessory) {
     this.log('Creating new platform accessory with name %s', name);
     platformAccessory = new PlatformAccessory(name, UUIDGen.generate(name));
     platformAccessory.context.type = 'SonosAccessory';
@@ -671,21 +940,27 @@ function SonosAccessory(api, log, name, zone, platformAccessory) {
     .on('get', this.getVolume.bind(this))
     .on('set', this.setVolume.bind(this));
 
-  sonosAccessories.set(zone, this);
+  platform.accessories.set(zone, this);
 
   if (!this.platformAccessory) {
     this.platformAccessory = platformAccessory;
-    this.api.registerPlatformAccessories('homebridge-sonos', 'Sonos', [platformAccessory]);
+    this.platform.api.registerPlatformAccessories('homebridge-sonos', 'Sonos', [platformAccessory]);
   }
 }
 
+// Common utils
+SonosAccessory.prototype._beginTransition = _utilBeginTransition;
+SonosAccessory.prototype.updateOn = _utilUpdateOn;
+
+// Return the coordinator device which is controlling the stream this Sonos
+// device is playing from (or itself if it is standalone)
 SonosAccessory.prototype._getCoordinator = function() {
   if (!this.device) {
     return false;
   }
 
-  var coordinator = sonosGroups.get(this.device.group);
-  if (coordinator === undefined) {
+  var coordinator = this.platform.groups.get(this.device.group);
+  if (!coordinator) {
     return false;
   }
 
@@ -726,21 +1001,63 @@ SonosAccessory.prototype.setOn = function(on, callback, context) {
     return;
   }
 
-  var state = on ? 'play' : 'stop';
-  this.log('Starting %s request via coordinator %s', state, coordinator.name);
+  // Flag that a transition is happening so we can prevent status updates until
+  // we complete
+  callback = this._beginTransition('On', callback);
 
-  coordinator.sonos[state](this._setOnCallback.bind(this, state, callback));
+  var delegate, what;
+  if (on) {
+    delegate = coordinator.accessory.unmuteAndPlay.bind(coordinator.accessory);
+    on = 'play';
+  } else {
+    delegate = coordinator.sonos.pause.bind(coordinator.sonos);
+    what = 'pause';
+  }
+
+  this.log('Starting %s request via coordinator %s', what, coordinator.name);
+
+  delegate(function (err) {
+    if (err) {
+      this.log('Device %s request failed: %s', what, err);
+      callback(err);
+      return;
+    }
+
+    this.log('Completed %s request', what);
+    callback(null);
+  }.bind(this));
 };
 
-SonosAccessory.prototype._setOnCallback = function (what, callback, err, success) {
-  this.log('Completed %s request with result: %s', what, success);
-
-  if (err) {
-    callback(err);
+SonosAccessory.prototype.unmuteAndPlay = function (callback) {
+  if (!this.device || !this.device.coordinator) {
+    this.log('Ignoring request; device is not a coordinator');
+    callback(new Error('Device is not a coordinator'));
     return;
   }
 
-  callback(null);
+  this.device.sonos.setMuted(false, function (err) {
+    if (err) {
+      this.log('Unmute request failed: %s', err);
+      callback(err);
+      return;
+    }
+
+    if (!this.device || !this.device.coordinator) {
+      this.log('Coordinator changed during play request');
+      callback(new Error('Coordinator changed during play request'));
+      return;
+    }
+
+    this.device.sonos.play(function (err) {
+      if (err) {
+        this.log('Play request failed: %s', err);
+        callback(err);
+        return;
+      }
+
+      callback(null);
+    }.bind(this));
+  }.bind(this));
 };
 
 SonosAccessory.prototype.getVolume = function(callback) {
@@ -778,7 +1095,7 @@ SonosAccessory.prototype.setVolume = function(volume, callback, context) {
 
   this.log('Setting volume to %s', volume);
 
-  this.device.sonos.setVolume(volume, function(err, data) {
+  this.device.sonos.setVolume(volume, function(err) {
     if (err) {
       this.log('Set volume failed: %s', err);
       callback(err);
