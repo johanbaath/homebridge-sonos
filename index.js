@@ -343,7 +343,7 @@ SonosPlatform.prototype.updateTopology = function (device, callback) {
 
         if (deviceData.accessory) {
           deviceData.accessory.log('Associated device has been renamed to zone %s - accessory is now unavailable', topologyZone.name);
-          deviceData.accessory.device = undefined;
+          deviceData.accessory.setDeviceData(undefined);
           this._updateReachability(deviceData.accessory, false);
         }
 
@@ -367,7 +367,7 @@ SonosPlatform.prototype.updateTopology = function (device, callback) {
         } else {
           accessory.log('Associated device discovered at %s', host);
         }
-        accessory.device = deviceData;
+        accessory.setDeviceData(deviceData);
       }
 
       // Set/update the group information - and the group map that locates coordinators
@@ -592,12 +592,20 @@ function SonosSceneAccessory(platform, log, name, sceneConfig, platformAccessory
     platformAccessory = new PlatformAccessory(name, UUIDGen.generate(name));
     platformAccessory.context.type = 'SonosSceneAccessory';
     platformAccessory.context.name = name;
-    this.service = platformAccessory.addService(Service.Switch, name);
+    this.infoService = platformAccessory.getService(Service.AccessoryInformation);
+    this.service = platformAccessory.addService(Service.Switch);
   } else {
     this.log('Restoring cached scene platform accessory with name %s', name);
     this.platformAccessory = platformAccessory;
+    this.infoService = platformAccessory.getService(Service.AccessoryInformation);
     this.service = platformAccessory.getService(Service.Switch);
   }
+
+  this.infoService
+    .setCharacteristic(Characteristic.Name, name)
+    .setCharacteristic(Characteristic.Manufacturer, 'homebridge-sonos')
+    .setCharacteristic(Characteristic.Model, 'Scene Accessory')
+    .setCharacteristic(Characteristic.SerialNumber, 'N/A');
 
   this.service
     .getCharacteristic(Characteristic.On)
@@ -922,12 +930,20 @@ function SonosAccessory(platform, log, name, zone, platformAccessory) {
     platformAccessory.context.type = 'SonosAccessory';
     platformAccessory.context.name = name;
     platformAccessory.context.zone = zone;
-    this.service = platformAccessory.addService(Service.Switch, name);
+    this.infoService = platformAccessory.getService(Service.AccessoryInformation);
+    this.service = platformAccessory.addService(Service.Switch);
   } else {
     this.log('Restoring cached platform accessory with name %s', name);
     this.platformAccessory = platformAccessory;
+    this.infoService = platformAccessory.getService(Service.AccessoryInformation);
     this.service = platformAccessory.getService(Service.Switch);
   }
+
+  this.infoService
+    .setCharacteristic(Characteristic.Name, name)
+    .setCharacteristic(Characteristic.Manufacturer, 'Sonos')
+    .setCharacteristic(Characteristic.Model, 'Unknown')
+    .setCharacteristic(Characteristic.SerialNumber, 'Unknown');
 
   this.service
     .getCharacteristic(Characteristic.On)
@@ -954,6 +970,20 @@ function SonosAccessory(platform, log, name, zone, platformAccessory) {
 // Common utils
 SonosAccessory.prototype._beginTransition = _utilBeginTransition;
 SonosAccessory.prototype.updateOn = _utilUpdateOn;
+
+// Set the device associated with this accessory
+SonosAccessory.prototype.setDeviceData = function (deviceData) {
+  this.device = deviceData;
+  if (deviceData === undefined) {
+    return;
+  }
+
+  // TODO: Once moved to node-ssdp we will have device model/serialNumber etc.
+  //       and we should update characteristics and context here and call
+  //       this.platform.api.updatePlatformAccessories to persist the new info
+  //       to the homebridge cache - we should then initialise these values in
+  //       the constructor from context
+};
 
 // Return the coordinator device which is controlling the stream this Sonos
 // device is playing from (or itself if it is standalone)
