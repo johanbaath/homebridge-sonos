@@ -587,18 +587,18 @@ function SonosSceneAccessory(platform, log, name, sceneConfig, platformAccessory
   this.name = name;
   this.sceneConfig = sceneConfig;
 
-  if (!platformAccessory) {
+  if (platformAccessory) {
+    this.log('Restoring cached scene platform accessory with name %s', name);
+    this.platformAccessory = platformAccessory;
+    this.infoService = platformAccessory.getService(Service.AccessoryInformation);
+    this.service = platformAccessory.getService(Service.Switch);
+  } else {
     this.log('Creating new scene platform accessory with name %s', name);
     platformAccessory = new PlatformAccessory(name, UUIDGen.generate(name));
     platformAccessory.context.type = 'SonosSceneAccessory';
     platformAccessory.context.name = name;
     this.infoService = platformAccessory.getService(Service.AccessoryInformation);
     this.service = platformAccessory.addService(Service.Switch);
-  } else {
-    this.log('Restoring cached scene platform accessory with name %s', name);
-    this.platformAccessory = platformAccessory;
-    this.infoService = platformAccessory.getService(Service.AccessoryInformation);
-    this.service = platformAccessory.getService(Service.Switch);
   }
 
   this.infoService
@@ -863,7 +863,7 @@ SonosSceneAccessory.prototype._configureVolume = function (device, callback) {
 
 // Set play mode and start playing
 SonosSceneAccessory.prototype._play = function (device, callback) {
-  device.sonos.setPlayMode('SHUFFLE_NOREPEAT', function (err) {
+  device.sonos.setPlayMode('SHUFFLE', function (err) {
     if (err) {
       this.log('Play mode request failed: %s', err);
       callback(err);
