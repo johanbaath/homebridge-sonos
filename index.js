@@ -1041,7 +1041,7 @@ SonosAccessory.prototype.setOn = function(on, callback, context) {
   var delegate, what;
   if (on) {
     delegate = coordinator.accessory.unmuteAndPlay.bind(coordinator.accessory);
-    on = 'play';
+    what = 'play';
   } else {
     delegate = coordinator.sonos.pause.bind(coordinator.sonos);
     what = 'pause';
@@ -1119,8 +1119,7 @@ SonosAccessory.prototype.setVolume = function(volume, callback, context) {
     return;
   }
 
-  var coordinator = this._getCoordinator();
-  if (!coordinator) {
+  if (!this.device) {
     this.log('Ignoring request; Sonos device has not yet been discovered.');
     callback(new Error('Sonos has not been discovered yet.'));
     return;
