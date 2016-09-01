@@ -690,7 +690,11 @@ SonosSceneAccessory.prototype.setOn = function (on, callback, context) {
   if (this.validateTopology(device)) {
     this.log('Starting scene request with existing group coordinator: %s', device.name);
     if (this.isDevicePlayingSceneUri(device)) {
-      this._configureVolume(device, callback);
+      if (this.sceneConfig.volume) {
+        this._configureVolume(device, callback);
+        return;
+      }
+      this._play(device, callback);
       return;
     }
     this._configurePlaylist(device, callback);
@@ -837,28 +841,58 @@ SonosSceneAccessory.prototype._configurePlaylist = function (device, callback) {
         return;
       }
 
-      this._configureVolume(device, callback);
+      this.log('Playlist has been configured on coordinator %s', device.name);
+
+      if (this.sceneConfig.volume) {
+        this._configureVolume(device, callback);
+        return;
+      }
+
+      this._play(device, callback);
     }.bind(this));
   }.bind(this));
 };
 
 // Configure volume level
 SonosSceneAccessory.prototype._configureVolume = function (device, callback) {
-  if (!this.sceneConfig.volume) {
-    this._play(device, callback);
-    return;
-  }
+  var callbackCount = 0,
+      lastErr,
+      collectCallback = function (err) {
+        if (err) {
+          this.log('Volume request failed: %s', err);
+          if (!lastErr) {
+            lastErr = err;
+          }
+        }
+
+        if (--callbackCount === 0) {
+          if (lastErr) {
+            callback(lastErr);
+            return;
+          }
+          this._play(device, callback);
+        }
+      }.bind(this);
 
   // Set the volume before we start playing
-  device.sonos.setVolume(this.sceneConfig.volume, function (err) {
-    if (err) {
-      this.log('Volume request failed: %s', err);
-      callback(err);
-      return;
+  for (var zone in this.sceneConfig.volume) {
+    if (zone == device.name) {
+      // Configure coordinator volume
+      callbackCount++;
+      device.accessory.setVolume(this.sceneConfig.volume[zone], collectCallback);
+      continue;
     }
 
-    this._play(device, callback);
-  }.bind(this));
+    // Skip unavailable zones so we can function partially
+    var zoneAccessory = this.platform.accessories.get(zone);
+    if (!zoneAccessory || !zoneAccessory.device) {
+      this.log('Skipping volume of zone %s as it is unreachable', zoneAccessory.device.name);
+      continue;
+    }
+
+    callbackCount++;
+    zoneAccessory.setVolume(this.sceneConfig.volume[zone], collectCallback);
+  }
 };
 
 // Set play mode and start playing
@@ -876,6 +910,8 @@ SonosSceneAccessory.prototype._play = function (device, callback) {
       return;
     }
 
+    this.log('Coordinator in zone %s is now set to SHUFFLE', device.name);
+
     device.accessory.unmuteAndPlay(function (err) {
       if (err) {
         this.log('Unmute request failed: %s', err);
@@ -888,6 +924,8 @@ SonosSceneAccessory.prototype._play = function (device, callback) {
         callback(null);
         return;
       }
+
+      this.log('Coordinator %s is now playing', device.name);
 
       this._configureSleepTimer(device, callback);
     }.bind(this));
@@ -1080,6 +1118,8 @@ SonosAccessory.prototype.unmuteAndPlay = function (callback) {
       callback(new Error('Coordinator changed during play request'));
       return;
     }
+
+    this.log('Device is now unmuted');
 
     this.device.sonos.play(function (err) {
       if (err) {

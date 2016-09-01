@@ -17,7 +17,9 @@ Example config.json:
       "Piano Collection": {
           "playlist": "spotify:user:12345678:playlist:XXXXXXXXXXXXXXXXXXXXXX",
           "zones": ["Lounge"],
-          "volume": 10,
+          "volume": {
+            "Lounge": 10
+          },
           "sleepTimer": "2:00:00"
       },
       "Party Music": {
@@ -43,7 +45,8 @@ the EU) the default of "2311" is fine. US citizens will need to set this to
 
 Adding `scenes` is also optional. Each entry inside it is the name of a switch
 to create that will set a Sonos "scene". This includes forming a group, setting
-a Spotify playlist, enabling shuffle, and optionally setting the volume and a
-sleep timer. The sleep timer configuration must be in the format `H:MM:SS`,
+a Spotify playlist, enabling shuffle, and optionally setting the volumes for
+each zone and a sleep timer. The sleep timer configuration must be in the format
+`H:MM:SS`.
 
 *NOTE*: The `scenes` functionality only works for Spotify at this time.
