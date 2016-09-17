@@ -1,9 +1,4 @@
-
 # Sonos Platform
-
-*NOTE*: IMPORTANT - once installed you will need to REPLACE the
-`node_modules/sonos` with https://github.com/driskell/node-sonos.git until the
-required improvements made there are raised and merged.
 
 Example config.json:
 
