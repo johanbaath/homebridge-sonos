@@ -534,47 +534,83 @@ SonosPlatform.prototype._processRenderingEvent = function (deviceData, eventStru
 };
 
 //
-// Sonos Accessory Utils
+// Transition utilities
 //
 
-// Begin transition flag and register a callback to reset it
-function _utilBeginTransition(what, callback) {
-  this['isTransitioning' + what] = true;
+// Get a transition status from the transition table
+function _utilGetTransition(characteristic) {
+  if (!this.transitions) {
+    this.transitions = new Map();
+  }
+
+  var transition = this.transitions.get(characteristic.UUID);
+  if (!transition) {
+    transition = {};
+    this.transitions.set(characteristic.UUID, transition);
+  }
+
+  return transition;
+}
+
+// Handle an internal update, checking for active transitions
+function _utilUpdateInternal(characteristic, value, quiet) {
+  var transition = _utilGetTransition.call(this, characteristic),
+      characteristicObj = this.service.getCharacteristic(characteristic);
+
+  // Are we transitioning?
+  if (!transition.isRunning) {
+    // Compare with the existing value so we avoid unnecessary changes and logging
+    // This is valid as HAP-NodeJS documents cacheable value as accessible directly
+    // We don't call getValue as it triggers our listeners
+    if (characteristicObj.value == value) {
+      return;
+    }
+
+    // Log only if we're not a 'noisy' event (like power usage that happens every second)
+    if (!quiet) {
+      this.log('Updating %s characteristic to %s', characteristicObj.displayName, value);
+    }
+
+    // Set the value with internal context so our listeners ignores it but so we
+    // still trigger change events to propogate to remote listeners (accessing
+    // the cached value propertly directly doesn't do this)
+    characteristicObj.setValue(value, null, '_internal');
+    return;
+  }
+
+  this.log('Deferring %s characteristic update to %s as it is currently transitioning', characteristicObj.displayName, value);
+  transition.deferred = value;
+}
+
+// Begin transition of a characteristic
+// Prevents internal updates from taking effect until a second after the
+// transition completes, to prevent flicking of states while status converges
+function _utilBeginTransition(characteristic, callback) {
+  var transition = _utilGetTransition.call(this, characteristic);
+
+  transition.isRunning = true;
 
   // If we have a deferred timeout running already, clear it
-  if (this['deferredTimeout' + what] !== undefined) {
-    clearTimeout(this['deferredTimeout' + what]);
-    this['deferredTimeout' + what] = undefined;
+  if (transition.deferredTimeout !== undefined) {
+    clearTimeout(transition.deferredTimeout);
+    transition.deferredTimeout = undefined;
   }
 
   return function (err) {
     // Set a timer to update to any deferred value after a small timeout that
     // will hopefully be long enough for events to converge on the desired state
-    this['deferredTimeout' + what] = setTimeout(function () {
-      this['isTransitioning' + what] = false;
-      if (this['deferred' + what] === undefined) {
+    transition.deferredTimeout = setTimeout(function () {
+      transition.isRunning = false;
+      if (transition.deferred === undefined) {
         return;
       }
 
-      this['update' + what](this['deferred' + what]);
-      this['deferred' + what] = undefined;
-    }.bind(this), 1000);
+      this._updateInternal(characteristic, transition.deferred);
+      transition.deferred = undefined;
+    }.bind(this), 2000);
 
     callback(err);
   }.bind(this);
-}
-
-// Handle an internal power state update
-function _utilUpdateOn(on) {
-  // Are we transitioning?
-  if (!this.isTransitioningOn) {
-    this.log('Updating power characteristic to %s', on);
-    this.service.getCharacteristic(Characteristic.On).setValue(on, null, '_internal');
-    return;
-  }
-
-  this.log('Deferring power characteristic update to %s as it is currently transitioning', on);
-  this.deferredOn = on;
 }
 
 //
@@ -629,8 +665,13 @@ function SonosSceneAccessory(platform, log, name, sceneConfig, platformAccessory
 }
 
 // Common utils
+SonosSceneAccessory.prototype._updateInternal = _utilUpdateInternal;
 SonosSceneAccessory.prototype._beginTransition = _utilBeginTransition;
-SonosSceneAccessory.prototype.updateOn = _utilUpdateOn;
+
+// Update current power state
+SonosSceneAccessory.prototype.updateOn = function (on) {
+  this._updateInternal(Characteristic.On, on);
+};
 
 // Fetch the coordinator device associated with this scene, or the first one
 // listed
@@ -669,7 +710,7 @@ SonosSceneAccessory.prototype.setOn = function (on, callback, context) {
 
   // Flag that a transition is happening so we can prevent status updates until
   // we complete
-  callback = this._beginTransition('On', callback);
+  callback = this._beginTransition(Characteristic.On, callback);
 
   if (!on) {
     this.log('Pausing coordinator');
@@ -1007,7 +1048,12 @@ function SonosAccessory(platform, log, name, zone, platformAccessory) {
 
 // Common utils
 SonosAccessory.prototype._beginTransition = _utilBeginTransition;
-SonosAccessory.prototype.updateOn = _utilUpdateOn;
+SonosAccessory.prototype._updateInternal = _utilUpdateInternal;
+
+// Update current power state
+SonosAccessory.prototype.updateOn = function (on) {
+  this._updateInternal(Characteristic.On, on);
+};
 
 // Set the device associated with this accessory
 SonosAccessory.prototype.setDeviceData = function (deviceData) {
@@ -1074,7 +1120,7 @@ SonosAccessory.prototype.setOn = function(on, callback, context) {
 
   // Flag that a transition is happening so we can prevent status updates until
   // we complete
-  callback = this._beginTransition('On', callback);
+  callback = this._beginTransition(Characteristic.On, callback);
 
   var delegate, what;
   if (on) {
