@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "sonos": "git+https://github.com/driskell/node-sonos.git#multi_device_listener",
-    "underscore": "^1.8.3"
+    "underscore": "^1.8.3",
+    "xml2js": "0.4.15"
   }
 }
