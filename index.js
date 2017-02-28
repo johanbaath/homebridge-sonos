@@ -587,6 +587,14 @@ function _utilUpdateInternal(characteristic, value, quiet) {
   transition.deferred = value;
 }
 
+// Get the internal cached value
+function _utilGetInternal(characteristic) {
+  var characteristicObj = this.service.getCharacteristic(characteristic);
+  // Return the cached value directly, don't use getValue which will use
+  // registered event handlers to get latest value which is not what we want
+  return characteristicObj.value;
+}
+
 // Begin transition of a characteristic
 // Prevents internal updates from taking effect until a second after the
 // transition completes, to prevent flicking of states while status converges
@@ -671,6 +679,7 @@ function SonosSceneAccessory(platform, log, name, sceneConfig, platformAccessory
 
 // Common utils
 SonosSceneAccessory.prototype._updateInternal = _utilUpdateInternal;
+SonosSceneAccessory.prototype._getInternal = _utilGetInternal;
 SonosSceneAccessory.prototype._beginTransition = _utilBeginTransition;
 
 // Update current power state
@@ -1053,6 +1062,7 @@ function SonosAccessory(platform, log, name, zone, platformAccessory) {
 
 // Common utils
 SonosAccessory.prototype._beginTransition = _utilBeginTransition;
+SonosAccessory.prototype._getInternal = _utilGetInternal;
 SonosAccessory.prototype._updateInternal = _utilUpdateInternal;
 
 // Update current power state
@@ -1123,6 +1133,31 @@ SonosAccessory.prototype.setOn = function(on, callback, context) {
     return;
   }
 
+  this.log('Starting %s request via coordinator %s', on ? 'play' : 'pause', coordinator.name);
+
+  // Are we stopped? If so, we can't pause, so ignore any request to do so
+  this.log('Current: %s', this._getInternal(Characteristic.On));
+  if (!on && !this._getInternal(Characteristic.On)) {
+    coordinator.sonos.getCurrentState(function (err, state) {
+      if (err) {
+        callback(err);
+        return;
+      }
+
+      if (state == 'stopped') {
+        this.log('Ignoring pause request as it would be invalid for state: %s', state);
+        callback(null);
+      } else {
+        this.log('Pause will be a valid request for state: %s', state);
+        this.playOrPause(coordinator, on, callback);
+      }
+    }.bind(this));
+  } else {
+    this.playOrPause(coordinator, on, callback);
+  }
+};
+
+SonosAccessory.prototype.playOrPause = function (coordinator, on, callback) {
   // Flag that a transition is happening so we can prevent status updates until
   // we complete
   callback = this._beginTransition(Characteristic.On, callback);
@@ -1135,8 +1170,6 @@ SonosAccessory.prototype.setOn = function(on, callback, context) {
     delegate = coordinator.sonos.pause.bind(coordinator.sonos);
     what = 'pause';
   }
-
-  this.log('Starting %s request via coordinator %s', what, coordinator.name);
 
   delegate(function (err) {
     if (err) {
