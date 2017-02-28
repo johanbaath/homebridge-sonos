@@ -1104,7 +1104,7 @@ SonosAccessory.prototype.getOn = function(callback) {
     }
 
     var playing = (state == 'playing');
-    this.log('Current state: %s', playing);
+    this.log('Current state: %s (%s)', state, playing);
     callback(null, playing);
   }.bind(this));
 };
