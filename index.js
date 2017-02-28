@@ -304,7 +304,7 @@ SonosPlatform.prototype.updateTopology = function (device, callback) {
       return;
     }
 
-    // For each zone, register the device orupdate the name, group and coordinator
+    // For each zone, register the device or update the name, group and coordinator
     // and for new devices setup event handlers
     topology.zones.forEach(function (topologyZone) {
       var urlObj = url.parse(topologyZone.location),
@@ -323,7 +323,8 @@ SonosPlatform.prototype.updateTopology = function (device, callback) {
           coordinator: undefined,
           queueUri: '',
           group: undefined,
-          uuid: undefined
+          uuid: undefined,
+          updateTimeout: undefined
         };
 
         // Register for events and store the new device
@@ -446,6 +447,34 @@ SonosPlatform.prototype.updateTopology = function (device, callback) {
       if (topologyZone.uuid != deviceData.uuid) {
         deviceData.uuid = topologyZone.uuid;
         this._log(deviceData, 'Device in zone %s is now UUID %s', deviceData.name, deviceData.uuid);
+      }
+    }.bind(this));
+
+    // In some cases there is a race where we see a snapshot of the topology
+    // in flex due to early group change events, but won't see another group
+    // change event, and we then end up with a cache of an invalid topology
+    // To prevent this, verify that we have a coordinator for everything, and
+    // request another topology update in a few seconds
+    // Furthermore, update topology frequently just in case
+    topology.zones.forEach(function (topologyZone) {
+      var coordinator = this.groups.get(topologyZone.group);
+      if (!coordinator) {
+        var firstDevice = this.groupMembers.get(topologyZone.group).values().next().value;
+        if (firstDevice.updateTimeout) {
+          clearTimeout(firstDevice.updateTimeout);
+        }
+        firstDevice.updateTimeout = setTimeout(function () {
+          this.log('Retrying topology update for missing coordinator of group %s', topologyZone.group);
+          this.updateTopology(firstDevice.sonos, function () {});
+        }.bind(this), 3000);
+      } else {
+        if (coordinator.updateTimeout) {
+          clearTimeout(coordinator.updateTimeout);
+        }
+        coordinator.updateTimeout = setTimeout(function () {
+          this.log('Running scheduled topology update for %s', coordinator.name);
+          this.updateTopology(coordinator.sonos, function () {});
+        }.bind(this), 600000);
       }
     }.bind(this));
 
