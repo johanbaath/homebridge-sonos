@@ -850,7 +850,7 @@ SonosSceneAccessory.prototype._configureTopology = function (device, callback) {
     // Skip unavailable zones so we can function partially
     var zoneAccessory = this.platform.accessories.get(zone);
     if (!zoneAccessory || !zoneAccessory.device) {
-      this.log('Skipping configuration of zone %s as it is unreachable', zoneAccessory.device.name);
+      this.log('Skipping configuration of zone %s as it is unreachable', zone);
       return;
     }
 
@@ -932,7 +932,7 @@ SonosSceneAccessory.prototype._configureVolume = function (device, callback) {
     // Skip unavailable zones so we can function partially
     var zoneAccessory = this.platform.accessories.get(zone);
     if (!zoneAccessory || !zoneAccessory.device) {
-      this.log('Skipping volume of zone %s as it is unreachable', zoneAccessory.device.name);
+      this.log('Skipping volume of zone %s as it is unreachable', zone);
       continue;
     }
 
