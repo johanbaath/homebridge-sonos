@@ -1119,7 +1119,7 @@ SonosAccessory.prototype.getOn = function(callback) {
   }.bind(this));
 };
 
-SonosAccessory.prototype.setOn = function(on, callback, context) {
+SonosAccessory.prototype.setOn = function (on, callback, context) {
   if (context == '_internal') {
     // An internal status update - don't do anything
     callback(null);
@@ -1217,14 +1217,14 @@ SonosAccessory.prototype.unmuteAndPlay = function (callback) {
   }.bind(this));
 };
 
-SonosAccessory.prototype.getVolume = function(callback) {
+SonosAccessory.prototype.getVolume = function (callback) {
   if (!this.device) {
     this.log('Ignoring request; Sonos device has not yet been discovered.');
     callback(new Error('Sonos has not been discovered yet.'));
     return;
   }
 
-  this.device.sonos.getVolume(function(err, volume) {
+  this.device.sonos.getVolume(function (err, volume) {
     if (err) {
       this.log('Current volume unknown: %s', err);
       callback(err);
@@ -1236,7 +1236,7 @@ SonosAccessory.prototype.getVolume = function(callback) {
   }.bind(this));
 };
 
-SonosAccessory.prototype.setVolume = function(volume, callback, context) {
+SonosAccessory.prototype.setVolume = function (volume, callback, context) {
   if (context == '_internal') {
     // An internal status update - don't do anything
     callback(null);
@@ -1251,7 +1251,7 @@ SonosAccessory.prototype.setVolume = function(volume, callback, context) {
 
   this.log('Setting volume to %s', volume);
 
-  this.device.sonos.setVolume(volume, function(err) {
+  this.device.sonos.setVolume(volume, function (err) {
     if (err) {
       this.log('Set volume failed: %s', err);
       callback(err);
