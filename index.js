@@ -459,10 +459,15 @@ SonosPlatform.prototype.updateTopology = function (device, callback) {
 // Process a state change event
 SonosPlatform.prototype._processAVEvent = function (deviceData, eventStruct) {
   var value, queueUri;
-  if (eventStruct.TransportState && eventStruct.TransportState[0].$.val == "PLAYING") {
+  if (!eventStruct.TransportState) {
+    value = false;
+    textValue = 'FAILED';
+  } else if (eventStruct.TransportState[0].$.val == "PLAYING") {
     value = true;
+    textValue = 'PLAYING';
   } else {
     value = false;
+    textValue = eventStruct.TransportState[0].$.val;
   }
 
   if (eventStruct['r:EnqueuedTransportURI']) {
@@ -473,7 +478,7 @@ SonosPlatform.prototype._processAVEvent = function (deviceData, eventStruct) {
 
   deviceData.queueUri = queueUri;
 
-  this._log(deviceData, 'State is now %s and queue URI is now "%s"', value, queueUri);
+  this._log(deviceData, 'State is now %s (%s) and queue URI is now "%s"', textValue, value, queueUri);
 
   var groupList = this.groupMembers.get(deviceData.group);
   if (!groupList) {
