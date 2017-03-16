@@ -981,37 +981,45 @@ SonosSceneAccessory.prototype._configureVolume = function (device, callback) {
 
 // Set play mode and start playing
 SonosSceneAccessory.prototype._play = function (device, callback) {
-  device.sonos.setPlayMode('SHUFFLE', function (err) {
+  device.sonos.selectQueue(function (err) {
     if (err) {
-      this.log('Play mode request failed: %s', err);
+      this.log('Select queue request failed: %s', err);
       callback(err);
       return;
     }
 
-    if (!device.accessory) {
-      this.log('Sonos device became unreachable during play request');
-      callback(new Error('Sonos device became unreachable'));
-      return;
-    }
-
-    this.log('Coordinator in zone %s is now set to SHUFFLE', device.name);
-
-    device.accessory.unmuteAndPlay(function (err) {
+    device.sonos.setPlayMode('SHUFFLE', function (err) {
       if (err) {
-        this.log('Unmute request failed: %s', err);
+        this.log('Play mode request failed: %s', err);
         callback(err);
         return;
       }
 
-      if (!this.sceneConfig.sleepTimer) {
-        this.log('Playlist %s successfully played', this.sceneConfig.playlist);
-        callback(null);
+      if (!device.accessory) {
+        this.log('Sonos device became unreachable during play request');
+        callback(new Error('Sonos device became unreachable'));
         return;
       }
 
-      this.log('Coordinator %s is now playing', device.name);
+      this.log('Coordinator in zone %s is now set to SHUFFLE', device.name);
 
-      this._configureSleepTimer(device, callback);
+      device.accessory.unmuteAndPlay(function (err) {
+        if (err) {
+          this.log('Unmute request failed: %s', err);
+          callback(err);
+          return;
+        }
+
+        if (!this.sceneConfig.sleepTimer) {
+          this.log('Playlist %s successfully played', this.sceneConfig.playlist);
+          callback(null);
+          return;
+        }
+
+        this.log('Coordinator %s is now playing', device.name);
+
+        this._configureSleepTimer(device, callback);
+      }.bind(this));
     }.bind(this));
   }.bind(this));
 };
